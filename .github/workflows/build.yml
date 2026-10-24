@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           RELEASE_NAME="Released on $(date -u +%Y%m%d%H%M)"
-          TAG_NAME="$(date -u +%Y%m%d%H%M)-${GITHUB_RUN_NUMBER}"
+          TAG_NAME="$(date -u +%Y%m%d%H%M)"
           echo "RELEASE_NAME=$RELEASE_NAME" >> "$GITHUB_ENV"
           echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
 
