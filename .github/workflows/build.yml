@@ -1,74 +1,320 @@
 name: build.yml
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 3,9,15,21 * * *"
+    # GitHub Actions uses UTC by default. Runs four times per day, away from :00.
+    - cron: "17 3,9,15,21 * * *"
   push:
     branches:
-      - master
+      - main
     paths-ignore:
       - "**/README.md"
 
+# The workflow publishes GitHub Releases and pushes the generated files to the
+# release branch. No personal access token is required.
+permissions:
+  contents: write
+
 jobs:
   build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set variables
-        run: |
-          echo "RELEASE_NAME=Released on $(date +%Y%m%d%H%M)" >> $GITHUB_ENV
-          echo "TAG_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
-          
-          echo "GEOIP_URL=https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/geoip.dat" >> $GITHUB_ENV
-          echo "GEOSITE_URL=https://raw.githubusercontent.com/runetfreedom/russia-blocked-geosite/release/geosite.dat" >> $GITHUB_ENV
-        shell: bash
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GEOIP_URL: https://raw.githubusercontent.com/runetfreedom/russia-blocked-geoip/release/geoip.dat
+      ANTIFILTER_DOWNLOAD: https://antifilter.download/list/domains.lst
+      ANTIFILTER_DOWNLOAD_COMMUNITY: https://community.antifilter.download/list/domains.lst
+      REFILTER_ALL: https://raw.githubusercontent.com/1andrevich/Re-filter-lists/refs/heads/main/domains_all.lst
+      PETERLOWE_REJECT_URL: https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=1&mimetype=plaintext
+      ADGUARD_DNS_REJECT_URL: https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
+      WIN_SPY: https://raw.githubusercontent.com/crazy-max/WindowsSpyBlocker/master/data/hosts/spy.txt
+      WIN_UPDATE: https://raw.githubusercontent.com/crazy-max/WindowsSpyBlocker/master/data/hosts/update.txt
+      WIN_EXTRA: https://raw.githubusercontent.com/crazy-max/WindowsSpyBlocker/master/data/hosts/extra.txt
+      GFW: https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/refs/heads/release/gfw.txt
+      GREATFIRE: https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/refs/heads/release/greatfire.txt
 
-      - name: Checkout runetfreedom/geodat2srs
-        uses: actions/checkout@v4
+    steps:
+      - name: Set release variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_NAME="Released on $(date -u +%Y%m%d%H%M)"
+          TAG_NAME="$(date -u +%Y%m%d%H%M)-${GITHUB_RUN_NUMBER}"
+          echo "RELEASE_NAME=$RELEASE_NAME" >> "$GITHUB_ENV"
+          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
+
+      - name: Checkout additional domain lists
+        uses: actions/checkout@v7
+        with:
+          repository: runetfreedom/russia-domains-list
+          ref: main
+          path: additional
+
+      - name: Checkout domain-list-custom generator
+        uses: actions/checkout@v7
+        with:
+          repository: runetfreedom/domain-list-custom
+          ref: master
+          path: custom
+
+      - name: Checkout current v2fly domain lists
+        id: community
+        uses: actions/checkout@v7
+        with:
+          repository: v2fly/domain-list-community
+          ref: master
+          path: community
+
+      - name: Checkout GeoIP/GeoSite to Sing-box converter
+        uses: actions/checkout@v7
         with:
           repository: runetfreedom/geodat2srs
+          ref: main
           path: geodat2srs
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
+          # geodat2srs requires Go 1.22.6; this toolchain also runs the builder.
           go-version-file: ./geodat2srs/go.mod
+          cache-dependency-path: |
+            ./custom/go.sum
+            ./geodat2srs/go.sum
 
-      - name: Collect files
+      - name: Download and prepare source lists
+        shell: bash
         run: |
-          mkdir -p ./publish
-          curl -sSL $GEOIP_URL > ./publish/geoip.dat
-          curl -sSL $GEOIP_URL.sha256sum > ./publish/geoip.dat.sha256sum
-          
-          curl -sSL $GEOSITE_URL > ./publish/geosite.dat
-          curl -sSL $GEOSITE_URL.sha256sum > ./publish/geosite.dat.sha256sum
+          set -euo pipefail
+          mkdir -p ./community/data ./publish
 
-      - name: Generate sing-box srs
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$ANTIFILTER_DOWNLOAD" --output ./antifilter-download.txt
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$ANTIFILTER_DOWNLOAD_COMMUNITY" --output ./antifilter-download-community.txt
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$REFILTER_ALL" --output ./refilter.txt
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$WIN_SPY" --output ./win-spy-source.txt
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$WIN_UPDATE" --output ./win-update-source.txt
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$WIN_EXTRA" --output ./win-extra-source.txt
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$GFW" --output ./gfw.txt
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$GREATFIRE" --output ./greatfire.txt
+
+          # Fail early if a source returned an empty body.
+          test -s ./antifilter-download.txt
+          test -s ./antifilter-download-community.txt
+          test -s ./refilter.txt
+          test -s ./win-spy-source.txt
+          test -s ./win-update-source.txt
+          test -s ./win-extra-source.txt
+          test -s ./gfw.txt
+          test -s ./greatfire.txt
+
+          awk '$1 == "0.0.0.0" { print $2 }' ./win-spy-source.txt > ./win-spy.txt
+          awk '$1 == "0.0.0.0" { print $2 }' ./win-update-source.txt > ./win-update.txt
+          awk '$1 == "0.0.0.0" { print $2 }' ./win-extra-source.txt > ./win-extra.txt
+          test -s ./win-spy.txt
+          test -s ./win-update.txt
+          test -s ./win-extra.txt
+
+          cp ./antifilter-download.txt ./community/data/antifilter-download
+          cp ./antifilter-download-community.txt ./community/data/antifilter-download-community
+          cp ./refilter.txt ./community/data/refilter
+          cp ./win-spy.txt ./community/data/win-spy
+          cp ./win-update.txt ./community/data/win-update
+          cp ./win-extra.txt ./community/data/win-extra
+          cp ./gfw.txt ./community/data/gfw
+          cp ./greatfire.txt ./community/data/greatfire
+
+          # Add the project's maintained domain lists (the repository contains
+          # README.md plus the extensionless rule file(s)).
+          rm -f ./additional/README.md
+          for file in ./additional/*; do
+            if [[ -f "$file" ]]; then
+              cp "$file" ./community/data/
+            fi
+          done
+
+      - name: Build advertising domain list
+        shell: bash
         run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$ADGUARD_DNS_REJECT_URL" --output ./adguard-filter.txt
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$PETERLOWE_REJECT_URL" --output ./peterlowe-filter.txt
+          test -s ./adguard-filter.txt
+          test -s ./peterlowe-filter.txt
+
+          perl -ne '/^\|\|([-_0-9a-zA-Z]+(\.[-_0-9a-zA-Z]+){1,64})\^$/ && print "$1\n"' ./adguard-filter.txt > ./temp-reject.txt
+          perl -ne '/^127\.0\.0\.1\s([-_0-9a-zA-Z]+(\.[-_0-9a-zA-Z]+){1,64})$/ && print "$1\n"' ./peterlowe-filter.txt >> ./temp-reject.txt
+          sed -i '/t.co/d' ./temp-reject.txt
+          sort --ignore-case -u ./temp-reject.txt > ./community/data/category-ads-all
+          test -s ./community/data/category-ads-all
+
+      - name: Build Russia blocked-list categories
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'include:antifilter-download-community' 'include:refilter' > ./community/data/ru-blocked
+          printf '%s\n' 'include:antifilter-download' 'include:antifilter-download-community' 'include:refilter' > ./community/data/ru-blocked-all
+
+      - name: Normalize invalid trailing fields in input lists
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          data_dir = Path("community/data")
+          findings = []
+          dropped = 0
+          max_dropped_tokens = 100
+
+          for path in sorted(data_dir.rglob("*")):
+              if not path.is_file():
+                  continue
+              text = path.read_text(encoding="utf-8-sig")
+              output = []
+              changed = False
+
+              for line_number, original_line in enumerate(text.splitlines(), start=1):
+                  body, marker, comment = original_line.partition("#")
+                  if not body.strip():
+                      output.append(original_line)
+                      continue
+
+                  fields = body.split()
+                  if not fields:
+                      output.append(original_line)
+                      continue
+
+                  kept = [fields[0]]
+                  invalid = []
+                  for token in fields[1:]:
+                      if token.startswith("@"):
+                          kept.append(token)
+                      else:
+                          invalid.append(token)
+
+                  normalized = " ".join(kept)
+                  if marker:
+                      normalized += " #" + comment
+
+                  if invalid:
+                      changed = True
+                      dropped += len(invalid)
+                      finding = (
+                          f"{path}:{line_number}: removed invalid trailing token(s) "
+                          f"{invalid!r}; retained rule {fields[0]!r}"
+                      )
+                      findings.append(finding)
+                      print(f"WARNING: {finding}")
+
+                  output.append(normalized)
+
+              if changed or output != text.splitlines():
+                  path.write_text("\n".join(output) + "\n", encoding="utf-8")
+
+          if not findings:
+              findings.append("No invalid trailing tokens found.")
+
+          Path("domain-list-normalization.log").write_text(
+              "\n".join(findings) + "\n", encoding="utf-8"
+          )
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"NORMALIZATION_DROPPED_TOKENS={dropped}\n")
+
+          print(f"Input normalization removed {dropped} invalid trailing token(s).")
+          if dropped > max_dropped_tokens:
+              raise SystemExit(
+                  f"Safety stop: found {dropped} invalid trailing tokens; "
+                  f"limit is {max_dropped_tokens}. Nothing will be published."
+              )
+          PY
+
+      - name: Build Russia-only input set
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ./community/data-ru
+          cp ./community/data/category-ads-all ./community/data/private ./community/data/ru-available-only-inside ./community/data/category-gov-ru ./community/data-ru/
+          cat ./community/data/antifilter-download-community ./community/data/refilter | sort --ignore-case -u > ./community/data-ru/ru-blocked
+          test -s ./community/data-ru/ru-blocked
+
+      - name: Build geosite.dat from current source lists
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd custom
+          go run ./ --exportlists= --datname=geosite-ru-only.dat --togfwlist=ru-blocked --datapath=../community/data-ru
+          go run ./ --exportlists=category-ads-all,google,youtube,discord,ru-blocked,ru-blocked-all,private,category-ecommerce --datapath=../community/data
+          test -s ./publish/geosite.dat
+          test -s ./publish/geosite-ru-only.dat
+          test -s ./publish/category-ecommerce.txt
+          grep --fixed-strings --line-regexp --quiet 'domain:24.place' ./publish/category-ecommerce.txt
+
+      - name: Collect GeoIP and generated GeoSite files
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --retry 3 --retry-all-errors "$GEOIP_URL" --output ./publish/geoip.dat
+          test -s ./publish/geoip.dat
+          install -Dp ./custom/publish/geosite-ru-only.dat ./publish/geosite-ru-only.dat
+          install -Dp ./custom/publish/geosite.dat ./publish/geosite.dat
+          install -p ./antifilter-download.txt ./antifilter-download-community.txt ./refilter.txt ./win-spy.txt ./win-update.txt ./win-extra.txt ./publish/
+          install -p ./custom/publish/ru-blocked.txt ./custom/publish/ru-blocked-all.txt ./custom/publish/discord.txt ./custom/publish/youtube.txt ./custom/publish/google.txt ./custom/publish/private.txt ./custom/publish/category-ads-all.txt ./custom/publish/category-ecommerce.txt ./publish/
+          install -p ./domain-list-normalization.log ./publish/domain-list-normalization.log
+          test -s ./publish/geosite.dat
+          grep --fixed-strings --line-regexp --quiet 'domain:24.place' ./publish/category-ecommerce.txt
+          (cd ./publish && sha256sum geoip.dat > geoip.dat.sha256sum && sha256sum geosite.dat > geosite.dat.sha256sum)
+
+          COMMUNITY_SHA="$(git -C community rev-parse HEAD)"
+          GENERATOR_SHA="$(git -C custom rev-parse HEAD)"
+          CONVERTER_SHA="$(git -C geodat2srs rev-parse HEAD)"
+          cat > ./publish/build-manifest.json <<EOF
+          {
+            "built_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "v2fly_domain_list_community_commit": "$COMMUNITY_SHA",
+            "domain_list_custom_commit": "$GENERATOR_SHA",
+            "geodat2srs_commit": "$CONVERTER_SHA",
+            "invalid_trailing_tokens_removed": $NORMALIZATION_DROPPED_TOKENS,
+            "required_category_test": "PASS: domain:24.place in category-ecommerce"
+          }
+          EOF
+
+      - name: Convert current GeoIP and GeoSite to Sing-box SRS
+        shell: bash
+        run: |
+          set -euo pipefail
           go build -C geodat2srs ./
           ./geodat2srs/geodat2srs geoip -i ./publish/geoip.dat -o ./tmp/sing-box/rule-set-geoip/
           ./geodat2srs/geodat2srs geosite -i ./publish/geosite.dat -o ./tmp/sing-box/rule-set-geosite/
-          cd ./tmp/sing-box || exit 1
-          zip -r ../../publish/sing-box.zip *
+          test -s ./tmp/sing-box/rule-set-geosite/geosite-category-ecommerce.srs
+          test -n "$(find ./tmp/sing-box/rule-set-geoip -type f -name '*.srs' -print -quit)"
+          test -n "$(find ./tmp/sing-box/rule-set-geosite -type f -name '*.srs' -print -quit)"
+          (cd ./tmp/sing-box && zip -r ../../publish/sing-box.zip *)
+          test -s ./publish/sing-box.zip
 
-      - name: Release and upload assets
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          release_name: ${{ env.RELEASE_NAME }}
-          tag: ${{ env.TAG_NAME }}
-          file_glob: true
-          file: ./publish/*
-
-      - name: Git push assets to "release" branch
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          rm -rf ./publish/sing-box.zip
-          mv ./tmp/sing-box ./publish/sing-box
-          cd publish || exit 1
+          set -euo pipefail
+          gh release create "$TAG_NAME" ./publish/* --title "$RELEASE_NAME"
+
+      - name: Publish current files to the release branch
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -f ./publish/sing-box.zip
+          mkdir -p ./publish/sing-box
+          cp -a ./tmp/sing-box/. ./publish/sing-box/
+          cd ./publish
           git init
           git config --local user.name "github-actions[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b release
-          git add .
-          git commit -m "${{ env.RELEASE_NAME }}"
+          git add -A
+          git commit -m "$RELEASE_NAME"
           git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
           git push -f -u origin release
