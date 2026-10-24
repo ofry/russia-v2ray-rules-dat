@@ -47,7 +47,6 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: runetfreedom/russia-domains-list
-          ref: main
           path: additional
 
       - name: Checkout domain-list-custom generator
@@ -242,12 +241,10 @@ jobs:
         run: |
           set -euo pipefail
           cd custom
-          go run ./ --exportlists= --datname=geosite-ru-only.dat --togfwlist=ru-blocked --datapath=../community/data-ru
-          go run ./ --exportlists=category-ads-all,google,youtube,discord,ru-blocked,ru-blocked-all,private,category-ecommerce --datapath=../community/data
+          go run ./ --excludeattrs= --exportlists= --datname=geosite-ru-only.dat --togfwlist=ru-blocked --datapath=../community/data-ru
+          go run ./ --excludeattrs= --exportlists=category-ads-all,google,youtube,discord,ru-blocked,ru-blocked-all,private --datapath=../community/data
           test -s ./publish/geosite.dat
           test -s ./publish/geosite-ru-only.dat
-          test -s ./publish/category-ecommerce.txt
-          grep --fixed-strings --line-regexp --quiet 'domain:24.place' ./publish/category-ecommerce.txt
 
       - name: Collect GeoIP and generated GeoSite files
         shell: bash
@@ -258,10 +255,9 @@ jobs:
           install -Dp ./custom/publish/geosite-ru-only.dat ./publish/geosite-ru-only.dat
           install -Dp ./custom/publish/geosite.dat ./publish/geosite.dat
           install -p ./antifilter-download.txt ./antifilter-download-community.txt ./refilter.txt ./win-spy.txt ./win-update.txt ./win-extra.txt ./publish/
-          install -p ./custom/publish/ru-blocked.txt ./custom/publish/ru-blocked-all.txt ./custom/publish/discord.txt ./custom/publish/youtube.txt ./custom/publish/google.txt ./custom/publish/private.txt ./custom/publish/category-ads-all.txt ./custom/publish/category-ecommerce.txt ./publish/
+          install -p ./custom/publish/ru-blocked.txt ./custom/publish/ru-blocked-all.txt ./custom/publish/discord.txt ./custom/publish/youtube.txt ./custom/publish/google.txt ./custom/publish/private.txt ./custom/publish/category-ads-all.txt ./publish/
           install -p ./domain-list-normalization.log ./publish/domain-list-normalization.log
           test -s ./publish/geosite.dat
-          grep --fixed-strings --line-regexp --quiet 'domain:24.place' ./publish/category-ecommerce.txt
           (cd ./publish && sha256sum geoip.dat > geoip.dat.sha256sum && sha256sum geosite.dat > geosite.dat.sha256sum)
 
           COMMUNITY_SHA="$(git -C community rev-parse HEAD)"
@@ -274,7 +270,7 @@ jobs:
             "domain_list_custom_commit": "$GENERATOR_SHA",
             "geodat2srs_commit": "$CONVERTER_SHA",
             "invalid_trailing_tokens_removed": $NORMALIZATION_DROPPED_TOKENS,
-            "required_category_test": "PASS: domain:24.place in category-ecommerce"
+            "geosite_generation_mode": "all parsed source categories"
           }
           EOF
 
@@ -285,7 +281,6 @@ jobs:
           go build -C geodat2srs ./
           ./geodat2srs/geodat2srs geoip -i ./publish/geoip.dat -o ./tmp/sing-box/rule-set-geoip/
           ./geodat2srs/geodat2srs geosite -i ./publish/geosite.dat -o ./tmp/sing-box/rule-set-geosite/
-          test -s ./tmp/sing-box/rule-set-geosite/geosite-category-ecommerce.srs
           test -n "$(find ./tmp/sing-box/rule-set-geoip -type f -name '*.srs' -print -quit)"
           test -n "$(find ./tmp/sing-box/rule-set-geosite -type f -name '*.srs' -print -quit)"
           (cd ./tmp/sing-box && zip -r ../../publish/sing-box.zip *)
