@@ -1,0 +1,8 @@
+{
+  "built_at_utc": "2026-10-31T19:18:55Z",
+  "v2fly_domain_list_community_commit": "1daade8c4bb957d21d1f5c09c2b050d699e8e96c",
+  "domain_list_custom_commit": "4139a15bf9ecafd97ea6c52e9b782bbf6b8c3df1",
+  "geodat2srs_commit": "368e4b324bb4b8c90da93d1b8429bd0af337dfda",
+  "invalid_trailing_tokens_removed": 9,
+  "geosite_generation_mode": "all parsed source categories"
+}
